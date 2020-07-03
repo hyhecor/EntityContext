@@ -5,43 +5,47 @@
 ### SqlConnection
 <pre>
 <code>
+using System;
 using System.Data;
 using System.Data.SqlClient;
-using System.Data.Common;
 
-public int Insert(DataTable data)
+class Models
 {
-    using (SqlCommand command = connection.CreateCommand())
+    public int Insert(DataTable data, SqlConnection connection, SqlTransaction trasection = null)
     {
-        command.CommandText = "SELECT * FROM +" sTableName;
-        command.CommandType = CommandType.Text;
-        command.Transaction = trasection;
-
-        int nRowUpdated = 0;
-        using (SqlDataAdapter adapter = new SqlDataAdapter(command))
-        using (SqlCommandBuilder commandBuilder = new SqlCommandBuilder(adapter))
+        using (SqlCommand command = connection.CreateCommand())
         {
-            adapter.RowUpdated += (s, e) => { ++nRowUpdated; };
-            try
+            command.CommandText = "SELECT * FROM " + data.TableName;
+            command.CommandType = CommandType.Text;
+            command.Transaction = trasection;
+
+            int nRowUpdated = 0;
+            using (SqlDataAdapter adapter = new SqlDataAdapter(command))
+            using (SqlCommandBuilder commandBuilder = new SqlCommandBuilder(adapter))
             {
-                adapter.InsertCommand = commandBuilder.GetInsertCommand();
+                adapter.RowUpdated += (s, e) => { ++nRowUpdated; };
+                try
+                {
+                    adapter.InsertCommand = commandBuilder.GetInsertCommand();
+                }
+                catch (Exception ex)
+                {
+                    throw ex;
+                }
+                try
+                {
+                    adapter.Update(data);
+                }
+                catch (Exception ex)
+                {
+                    throw ex;
+                }
+                return nRowUpdated;
             }
-            catch (Exception ex)
-            {
-                throw ex;
-            }
-            try
-            {
-            adapter.Update(data)
-            }
-            catch (Exception ex)
-            {
-                throw ex;
-            }
-            return nRowUpdated;
         }
     }
 }
+
 </code>
 </pre>
 ### OleDbConnection
