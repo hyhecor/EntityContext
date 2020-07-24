@@ -1,18 +1,25 @@
-
+using GPOS.FW.BaseLibrary;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.Data.Linq;
 using System.Data.OleDb;
 using System.Data.SqlClient;
 using System.Diagnostics;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 
-namespace Models
+namespace POS.SVC.Main.EntityModels
 {
-    public class EntityModel : IDisposable
+    public class EntityContext : IDisposable
     {
         #region IDisposable
+
+        internal List<IDisposable> Disposables = new List<IDisposable>();
+
         private bool disposedValue;
 
         protected virtual void Dispose(bool disposing)
@@ -23,11 +30,17 @@ namespace Models
                 {
                     // TODO: 관리형 상태(관리형 개체)를 삭제합니다.
                     if (null != this._baseTable) this._baseTable.Dispose();
+
+                    foreach (IDisposable item in this.Disposables)
+                        if (null != item) item.Dispose();
                 }
 
                 // TODO: 비관리형 리소스(비관리형 개체)를 해제하고 종료자를 재정의합니다.
                 // TODO: 큰 필드를 null로 설정합니다.
                 this._baseTable = null;
+
+                this.Disposables.Clear();
+
                 disposedValue = true;
             }
         }
@@ -68,15 +81,23 @@ namespace Models
         /// </summary>
         /// <param name="pTableName"></param>
         /// <param name="pDbConn"></param>
-        public EntityModel(string pTableName, IDbConnection pDbConn)
+        public EntityContext(string pTableName, IDbConnection pDbConn)
         {
             this.DbConnection = pDbConn;
             this._baseTableName = pTableName;
         }
-        public EntityModel(string pTableName, IDbConnection pDbConn, IDbTransaction pDbTran)
+        public EntityContext(string pTableName, IDbConnection pDbConn, IDbTransaction pDbTran)
         {
             this.DbConnection = pDbConn;
             this.DbTransaction = pDbTran;
+            this._baseTableName = pTableName;
+        }
+
+        public EntityContext(string pTableName, Func<IDbConnection> pFnDbConn)
+        {
+            this.DbConnection = pFnDbConn();
+            this.Disposables.Add(this.DbConnection);
+
             this._baseTableName = pTableName;
         }
         void setDataTable(DataTable pDataTable)
@@ -85,23 +106,121 @@ namespace Models
 
             this._baseTable = pDataTable;
         }
-        public void SetTableRows(DataTable pDataTable)
+        public Int_Exception SetTableRows(DataTable pDataTable)
         {
             this.GetDataTable().Rows.Clear();
 
-            foreach (DataRow row in pDataTable.Rows)
+            return AddOrReplaceTableRows(pDataTable);
+        }
+        public Int_Exception SetTableRows(DataRow[] pDataRow)
+        {
+            this.GetDataTable().Rows.Clear();
+
+            return AddOrReplaceTableRows(pDataRow);
+        }
+        public Int_Exception AddOrReplaceTableRows(DataTable pDataTable)
+        {
+            Func<DataTable, DataRow[]> func = (table) =>
             {
-                DataRow newRow = this.GetDataTable().NewRow();
-                foreach (DataColumn col in newRow.Table.Columns)
-                {
-                    newRow[col.ColumnName] = row[col.ColumnName];
-                }
-                this.GetDataTable().Rows.Add(newRow);
-            }
-            // 변경사항을 초기화
-            this.GetDataTable().AcceptChanges();
+                return (from x in table.Rows.Cast<DataRow>() select x).ToArray();
+            };
+            return AddOrReplaceTableRows(func(pDataTable));
         }
 
+        public Int_Exception AddOrReplaceTableRows(DataRow[] pDataTable)
+        {
+            // make key array
+            Func<DataRow, string> fn_pks_string = (data_row) =>
+            {
+                List<string> pks = new List<string>();
+                foreach (int ordinal in (from x in data_row.Table.PrimaryKey.Cast<DataColumn>()
+                                         orderby x.Ordinal
+                                         select x.Ordinal))
+                    pks.Add($"{data_row.Table.Columns[ordinal].ColumnName}='{data_row[ordinal]}'");
+                return string.Join(" AND ", pks);
+            };
+#if false
+                Func<DataRow, object[]> fn_pks_objects = (row) =>
+                {
+                    List<object> pks = new List<object>();
+                    foreach (int ordinal in (from x in row.Table.PrimaryKey.Cast<DataColumn>()
+                                             orderby x.Ordinal
+                                             select x.Ordinal))
+                        pks.Add($"{row[ordinal]}");
+                    return pks.ToArray();
+                };
+#endif
+
+            foreach (DataRow row in pDataTable)
+            {
+
+                DataRow new_one = this.GetDataTable().NewRow();
+
+                try
+                {
+                    //new_one.ItemArray = row.ItemArray; // without column check
+
+                    foreach (DataColumn col in new_one.Table.Columns)
+                        new_one[col.ColumnName] = row[col.ColumnName]; // with column check
+
+                    //foreach (DataColumn col in new_one.Table.Columns) 
+                    //{
+                    //    int order_orgin = row.Table.Columns.IndexOf(col.ColumnName);
+                    //    int order_new = col.Ordinal;
+
+                    //    Debug.WriteLine($"diff order origin={order_orgin} new={col.Ordinal}");
+
+                    //    bool ok = true;
+                    //    // 이름 
+                    //    if (0 > order_orgin)
+                    //    {
+                    //        ok = false;
+                    //        Debug.WriteLine($"diff order new={col.Ordinal}={col.ColumnName}={col.DataType.ToString()}");
+                    //    }
+                    //    else if (row.Table.Columns[order_orgin].DataType.ToString() != col.DataType.ToString())
+                    //    {
+                    //        ok = false;
+
+                    //        Debug.WriteLine($"diff type origin={row.Table.Columns[order_orgin].ColumnName}={row.Table.Columns[order_orgin].DataType.ToString()} new={col.ColumnName}={col.DataType.ToString()}");
+                    //    }
+
+                    //    if (true == ok) new_one[col.ColumnName] = row[col.ColumnName];
+                    //}
+                }
+                catch (Exception ex)
+                {
+                    // System.ArgumentException
+                    // System.InvalidCastException
+                    // System.Data.ConstraintException
+                    // System.Data.ReadOnlyException
+                    // System.Data.NoNullAllowedException
+                    // System.Data.DeletedRowInaccessibleException
+
+                    return new Int_Exception(ex);
+                }
+                try
+                {
+                    // find use key object[]
+                    DataRow[] index = this.GetDataTable().Select(fn_pks_string(new_one));
+                    if (0 < index.Length)
+                    {
+                        index[0].ItemArray = new_one.ItemArray; // replace
+                    }
+                    else
+                    {
+                        this.GetDataTable().Rows.Add(new_one); // add
+                    }
+                }
+                catch (Exception ex)
+                {
+                    return new Int_Exception(ex);
+                }
+            }
+            // 변경사항을 초기화
+            //this.GetDataTable().AcceptChanges();
+
+            return new Int_Exception(this.GetDataTable().Rows.Count);
+        }
         public DataColumn[] PrimaryKey
         {
             get
@@ -122,6 +241,9 @@ namespace Models
             }
         }
 
+        public int BatchSize { get { return _BatchSize; } set { this._BatchSize = value; } }
+        int _BatchSize = int.MaxValue;
+
         /// <summary>
         /// GetDataTable
         /// </summary>
@@ -132,11 +254,23 @@ namespace Models
             {
                 return this._baseTable;
             }
-            this._baseTable = EntityModelRegister.Clone(this.DbConnection, this.DataTableName);
+            this._baseTable = EntityContextRegister.Clone(this.DbConnection, this.DataTableName);
             if (null != this._baseTable)
             {
                 return this._baseTable;
             }
+
+            bool isTableExists = false;
+            if (this.DbConnection is SqlConnection)
+            {
+                isTableExists = checkDataTable(this.DataTableName, this.DbConnection, this.DbTransaction);
+            }
+            if (this.DbConnection is OleDbConnection)
+            {
+                isTableExists = checkOleDataTable(this.DataTableName, (OleDbConnection)this.DbConnection, (OleDbTransaction)this.DbTransaction);
+            }
+            if (false == isTableExists)
+                return null;
 
             DataTable dt = getDataTableSchema(this.DataTableName, this.DbConnection, this.DbTransaction);
 
@@ -178,7 +312,7 @@ namespace Models
 
             // 복제본을 지정
             this.setDataTable(dt.Clone());
-            EntityModelRegister.Add(this.DbConnection, this.DataTableName, this._baseTable);
+            EntityContextRegister.Add(this.DbConnection, this.DataTableName, this._baseTable);
 
             return this._baseTable;
 
@@ -190,19 +324,7 @@ namespace Models
         /// <returns></returns>
         public Int_Exception Insert()
         {
-
-            string fmtQuery = @"
-SELECT * FROM {0}
-;
-";
-            // 인서트 레코드 선택
-            foreach (DataRow row in this.GetDataTable().Rows)
-                row.SetAdded();
-
-            string query = string.Format(fmtQuery,
-                this.DataTableName
-                );
-            //Debug.WriteLine(query);
+            string query = $"SELECT * FROM {this.DataTableName}";
 
             using (IDbCommand cmd = this.DbConnection.CreateCommand())
             {
@@ -231,7 +353,6 @@ SELECT * FROM {0}
                 try
                 {
                     adapter.InsertCommand = commandBuilder.GetInsertCommand();
-                    //Debug.WriteLine(adapter.InsertCommand.CommandText);
                 }
                 catch (Exception ex)
                 {
@@ -240,10 +361,15 @@ SELECT * FROM {0}
 
                 try
                 {
-                    if (this.DbConnection is SqlConnection)
-                        ((SqlDataAdapter)adapter).Update(this.GetDataTable());
-                    if (this.DbConnection is OleDbConnection)
-                        ((OleDbDataAdapter)adapter).Update(this.GetDataTable());
+                    DataRow[] rows;
+                    while (0 < (rows = get_data_rows(this.GetDataTable(), DataRowState.Added, this.BatchSize)).Length)
+                    {
+                        if (this.DbConnection is SqlConnection)
+                            ((SqlDataAdapter)adapter).Update(rows);
+
+                        if (this.DbConnection is OleDbConnection)
+                            ((OleDbDataAdapter)adapter).Update(rows);
+                    };
                 }
                 catch (Exception ex)
                 {
@@ -259,23 +385,16 @@ SELECT * FROM {0}
         /// Update
         /// </summary>
         /// <param name="pKeyValue"></param>
-        /// <param name="opt"></param>
         /// <returns></returns>
-        public Int_Exception Update(Hashtable pKeyValue, params string[] opt)
+        public Int_Exception Update(Hashtable pKeyValue)
         {
-            string fmtQuery = @"
-SELECT * FROM {0}
-;
-";
+            if (null == pKeyValue) pKeyValue = new Hashtable();
+
             foreach (DataRow row in this.GetDataTable().Rows)
                 foreach (string key in pKeyValue.Keys)
                     row[key] = pKeyValue[key];
 
-
-            string query = string.Format(fmtQuery,
-                this.DataTableName
-                );
-            //Debug.WriteLine(query);
+            string query = $"SELECT * FROM {this.DataTableName}";
 
             using (IDbCommand cmd = this.DbConnection.CreateCommand())
             {
@@ -304,7 +423,6 @@ SELECT * FROM {0}
                 try
                 {
                     adapter.UpdateCommand = commandBuilder.GetUpdateCommand();
-                    //Debug.WriteLine(adapter.UpdateCommand.CommandText);
                 }
                 catch (Exception ex)
                 {
@@ -313,10 +431,15 @@ SELECT * FROM {0}
 
                 try
                 {
-                    if (this.DbConnection is SqlConnection)
-                        ((SqlDataAdapter)adapter).Update(this.GetDataTable());
-                    if (this.DbConnection is OleDbConnection)
-                        ((OleDbDataAdapter)adapter).Update(this.GetDataTable());
+                    DataRow[] rows;
+                    while (0 < (rows = get_data_rows(this.GetDataTable(), DataRowState.Modified, this.BatchSize)).Length)
+                    {
+                        if (this.DbConnection is SqlConnection)
+                            ((SqlDataAdapter)adapter).Update(rows);
+
+                        if (this.DbConnection is OleDbConnection)
+                            ((OleDbDataAdapter)adapter).Update(rows);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -331,21 +454,10 @@ SELECT * FROM {0}
         /// <summary>
         /// Delete
         /// </summary>
-        /// <param name="opt"></param>
         /// <returns></returns>
-        public Int_Exception Delete(params string[] opt)
+        public Int_Exception Delete()
         {
-            string fmtQuery = @"
-SELECT * FROM {0}
-;
-";
-            foreach (DataRow row in this.GetDataTable().Rows)
-                row.Delete();
-
-            string query = string.Format(fmtQuery,
-                this.DataTableName
-                );
-            //Debug.WriteLine(query);
+            string query = $"SELECT * FROM {this.DataTableName}";
 
             using (IDbCommand cmd = this.DbConnection.CreateCommand())
             {
@@ -374,7 +486,6 @@ SELECT * FROM {0}
                 try
                 {
                     adapter.DeleteCommand = commandBuilder.GetDeleteCommand();
-                    //Debug.WriteLine(adapter.DeleteCommand.CommandText);
                 }
                 catch (Exception ex)
                 {
@@ -383,10 +494,15 @@ SELECT * FROM {0}
 
                 try
                 {
-                    if (this.DbConnection is SqlConnection)
-                        ((SqlDataAdapter)adapter).Update(this.GetDataTable());
-                    if (this.DbConnection is OleDbConnection)
-                        ((OleDbDataAdapter)adapter).Update(this.GetDataTable());
+                    DataRow[] rows;
+                    while (0 < (rows = get_data_rows(this.GetDataTable(), DataRowState.Deleted, this.BatchSize)).Length)
+                    {
+                        if (this.DbConnection is SqlConnection)
+                            ((SqlDataAdapter)adapter).Update(rows);
+
+                        if (this.DbConnection is OleDbConnection)
+                            ((OleDbDataAdapter)adapter).Update(rows);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -406,42 +522,20 @@ SELECT * FROM {0}
         /// <returns></returns>
         public Int_Exception Select(Hashtable param, params string[] opt)
         {
-            string fmtQuery = @"
-SELECT {2} FROM {0} WITH(NOLOCK)
-        WHERE 1=1 
-          {1}
-{3}
-;
-";
-            if (this.DbConnection is OleDbConnection)
-            {
-                fmtQuery = fmtQuery.Replace("WITH(NOLOCK)", "");
-            }
+            if (null == param) param = new Hashtable();
 
             List<string> columns = new List<string>();
-
             foreach (DataColumn col in this.Columns)
-            {
-                columns.Add(string.Format("{0}",
-                        col.ColumnName
-                        ));
-            }
+                columns.Add(string.Format("{0}", col.ColumnName));
+            
 
             List<string> conds = new List<string>();
-
             foreach (object key in param.Keys)
-            {
-                conds.Add(string.Format("AND {0}='{1}'",
-                        key,
-                        param[key]
-                        ));
-            }
-            string query = string.Format(fmtQuery,
-                this.DataTableName,
-                string.Join(" ", conds),
-                string.Join(", ", columns),
-                string.Join("\r\n", opt)
-                );
+                conds.Add(string.Format("AND {0}='{1}'", key, param[key]));
+            
+            string query = $"SELECT {string.Join(", ", columns)} FROM {this.DataTableName}"
+                + ((this.DbConnection is OleDbConnection) ? "" : " WITH(NOLOCK)")
+                + $" WHERE 1=1 {string.Join(" ", conds)} {string.Join(" ", opt)}";
             Debug.WriteLine(query);
 
             this.GetDataTable().Rows.Clear();
@@ -473,50 +567,64 @@ SELECT {2} FROM {0} WITH(NOLOCK)
         {
             if (this.DbConnection is SqlConnection)
             {
-                SqlBulkCopyOptions opt = SqlBulkCopyOptions.CheckConstraints | SqlBulkCopyOptions.KeepNulls | SqlBulkCopyOptions.TableLock;
-                opt = SqlBulkCopyOptions.Default;
+                //SqlBulkCopyOptions opt = SqlBulkCopyOptions.CheckConstraints | SqlBulkCopyOptions.KeepNulls | SqlBulkCopyOptions.TableLock;
+                SqlBulkCopyOptions opt = SqlBulkCopyOptions.Default | SqlBulkCopyOptions.KeepNulls;
 
                 using (SqlBulkCopy bulkCopy = new SqlBulkCopy((SqlConnection)this.DbConnection, opt, (SqlTransaction)this.DbTransaction))
                 {
+                    bulkCopy.BulkCopyTimeout = 300;
+                    bulkCopy.BatchSize = this.BatchSize;
                     bulkCopy.DestinationTableName = this.DataTableName;
 
                     foreach (var column in this.Columns)
                         bulkCopy.ColumnMappings.Add(column.ToString(), column.ToString());
-
 
                     int nSqlRowsCopied = 0;
                     bulkCopy.SqlRowsCopied += (s, e) => { ++nSqlRowsCopied; };
 
                     try
                     {
-                        bulkCopy.WriteToServer(this.GetDataTable());
+                        DataRow[] rows;
+                        while (0 < (rows = get_data_rows(this.GetDataTable(), DataRowState.Added, BatchSize)).Length)
+                        {
+                            bulkCopy.WriteToServer(rows);
+
+                            // SqlBulkCopy.WriteToServer 함수는 RowState 생태를 변경 시켜주지 않는다 
+                            // get_data_rows 함수에서 DataRowState.Added 상태를 중복해서 가져오지 않기위해 강제 변환
+                            foreach (DataRow row in rows)
+                                row.AcceptChanges();
+                        }
                     }
+                    //catch (SqlException ex)
+                    //{
+                    //    // 2601 Violation in unique index
+                    //    // 2627 Violation in unique constraint
+                    //    if (2601 == ex.Number || 2627 == ex.Number)
+                    //    {
+                    //    }
+                    //    else
+                    //    {
+                    //        return new Int_Exception(ex);
+                    //    }
+                    //}
                     catch (Exception ex)
                     {
                         return new Int_Exception(ex);
                     }
+
                     return new Int_Exception(nSqlRowsCopied);
                 }
             }
             else if (this.DbConnection is OleDbConnection)
             {
-                string fmt_query = @"
-SELECT * FROM {0} 
-;
-";
-                string query = string.Format(fmt_query,
-                    this.DataTableName
-                    );
+                string query = $"SELECT * FROM {this.DataTableName} ";
 
                 using (OleDbCommand cmd = (OleDbCommand)this.DbConnection.CreateCommand())
                 {
                     cmd.CommandText = query;
                     cmd.CommandType = CommandType.Text;
                     cmd.Transaction = (OleDbTransaction)this.DbTransaction;
-
-                    // 인서트 레코드 선택
-                    foreach (DataRow r in this.GetDataTable().Rows)
-                        if (r.RowState == DataRowState.Unchanged) r.SetAdded();
+                    cmd.CommandTimeout = 300;
 
                     using (OleDbDataAdapter adapter = new OleDbDataAdapter(cmd))
                     {
@@ -528,6 +636,7 @@ SELECT * FROM {0}
                         {
                             OleDbCommandBuilder oleDbCommandBuilder = new OleDbCommandBuilder(adapter);
                             adapter.InsertCommand = oleDbCommandBuilder.GetInsertCommand();
+                            adapter.UpdateCommand = oleDbCommandBuilder.GetUpdateCommand(); // ?
                         }
                         catch (Exception ex)
                         {
@@ -536,7 +645,11 @@ SELECT * FROM {0}
 
                         try
                         {
-                            adapter.Update(this.GetDataTable()); // DataTable 업로드
+                            DataRow[] rows;
+                            while (0 < (rows = get_data_rows(this.GetDataTable(), DataRowState.Added, BatchSize)).Length)
+                            {
+                                adapter.Update(rows);
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -552,6 +665,14 @@ SELECT * FROM {0}
                 return new Int_Exception(0);
             }
         }
+
+        Func<DataTable, DataRowState, int, DataRow[]> get_data_rows = (table, state, batch_size) =>
+        {
+            return (from x in table.Rows.Cast<DataRow>()
+                    where x.RowState == (x.RowState & state)
+                    select x).Take(batch_size).ToArray();
+        };
+
         #endregion
 
 
@@ -590,7 +711,7 @@ SELECT * FROM {0}
         /// <returns></returns>
         static DataColumn[] getDataTablePrimaryKey(DataTable pDataTable, string pTableName, IDbConnection pDbConn, IDbTransaction pDbTran)
         {
-            string q = string.Format("SELECT * FROM {0} WHERE TABLE_NAME = '{1}'; ", "INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE", pTableName);
+            string q = string.Format($"SELECT * FROM INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE WHERE TABLE_NAME='{pTableName}';");
 
             using (IDbCommand cmd = pDbConn.CreateCommand())
             {
@@ -602,25 +723,7 @@ SELECT * FROM {0}
                 using (IDataReader reader = cmd.ExecuteReader())
                 {
                     ConstraintColumnUsage.Load(reader);
-                    int nRet = ConstraintColumnUsage.Rows.Count;
-
-                    List<DataColumn> PrimaryKeys = new List<DataColumn>();
-                    foreach (DataRow row in ConstraintColumnUsage.Rows)
-                    {
-                        DataColumn pkColumn = null;
-                        string columnName = row.Field<string>("COLUMN_NAME");
-                        foreach (DataColumn column in pDataTable.Columns)
-                        {
-                            if (column.ColumnName == columnName)
-                            {
-                                pkColumn = column;
-                                break;
-                            }
-                        }
-                        if (null != pkColumn)
-                            PrimaryKeys.Add(pkColumn);
-                    }
-                    return PrimaryKeys.ToArray();
+                    return extractPrimaryKey(pDataTable, ConstraintColumnUsage);
                 }
             }
         }
@@ -633,15 +736,27 @@ SELECT * FROM {0}
         /// <returns></returns>
         static DataColumn[] getOleDataTablePrimaryKey(DataTable pDataTable, string pTableName, OleDbConnection pDbConn, OleDbTransaction pDbTran)
         {
-            DataTable ConstraintColumnUsage = pDbConn.GetOleDbSchemaTable(OleDbSchemaGuid.Primary_Keys, new object[]
+            object[] opt = new object[]
             {
                 null, // TABLE_CATALOG
                 null, // TABLE_SCHEMA
                 pTableName, // TABLE_NAME * 
-            });
-
+            };
+            using (DataTable ConstraintColumnUsage = pDbConn.GetOleDbSchemaTable(OleDbSchemaGuid.Primary_Keys, opt))
+            {
+                return extractPrimaryKey(pDataTable, ConstraintColumnUsage);
+            }
+        }
+        /// <summary>
+        /// extractPrimaryKey - 테이블 기본키 가져오기 (공통)
+        /// </summary>
+        /// <param name="pDataTable"></param>
+        /// <param name="pConstraintColumnUsage"></param>
+        /// <returns></returns>
+        static DataColumn[] extractPrimaryKey(DataTable pDataTable, DataTable pConstraintColumnUsage)
+        {
             List<DataColumn> PrimaryKeys = new List<DataColumn>();
-            foreach (DataRow row in ConstraintColumnUsage.Rows)
+            foreach (DataRow row in pConstraintColumnUsage.Rows)
             {
                 DataColumn pkColumn = null;
                 string columnName = row.Field<string>("COLUMN_NAME");
@@ -657,6 +772,115 @@ SELECT * FROM {0}
                     PrimaryKeys.Add(pkColumn);
             }
             return PrimaryKeys.ToArray();
+        }
+
+        /// <summary>
+        /// checkDataTable
+        /// </summary>
+        /// <param name="pDataTable"></param>
+        /// <param name="pTableName"></param>
+        /// <param name="pDbConn"></param>
+        /// <param name="pDbTran"></param>
+        /// <returns></returns>
+        static bool checkDataTable(string pTableName, IDbConnection pDbConn, IDbTransaction pDbTran)
+        {
+            if (0 == pTableName.IndexOf("INFORMATION_SCHEMA."))
+                return true; // it is System Information Schema Views
+
+            string q = string.Format($"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='{pTableName}';");
+
+            using (IDbCommand cmd = pDbConn.CreateCommand())
+            {
+                cmd.CommandText = q;
+                cmd.CommandType = CommandType.Text;
+                cmd.Transaction = pDbTran;
+
+                using (DataTable dt = new DataTable())
+                using (IDataReader reader = cmd.ExecuteReader())
+                {
+                    dt.Load(reader);
+                    return 0 < dt.Rows.Count;
+                }
+            }
+        }
+
+        /// <summary>
+        /// checkOleDataTable
+        /// </summary>
+        /// <param name="pDataTable"></param>
+        /// <param name="pTableName"></param>
+        /// <param name="pDbConn"></param>
+        /// <param name="pDbTran"></param>
+        /// <returns></returns>
+        static bool checkOleDataTable(string pTableName, OleDbConnection pDbConn, OleDbTransaction pDbTran)
+        {
+            object[] opt = new object[]
+            {
+                null, // TABLE_CATALOG
+                null, // TABLE_SCHEMA
+                pTableName, // TABLE_NAME * 
+                null, // TABLE_TYPE      
+            };
+
+            using (DataTable dt = pDbConn.GetOleDbSchemaTable(OleDbSchemaGuid.Tables, opt))
+            {
+                return 0 < dt.Rows.Count;
+            }
+        }
+        /// <summary>
+        /// ExectuteBatch
+        /// </summary>
+        /// <param name="pQuery"></param>
+        /// <param name="pConnection"></param>
+        /// <param name="pTransaction"></param>
+        /// <returns></returns>
+        public static Int_Exception ExectuteBatch(string pQuery, IDbConnection pConnection, IDbTransaction pTransaction = null)
+        {
+            pQuery = pQuery.Replace("\r\n", "\n");
+            pQuery += "\nGO";
+            //Debug.WriteLine(this.Query);
+
+            string sqlBatch = string.Empty;
+            int nRst = 0;
+            foreach (string line in pQuery.Split(new string[2] { "\n", "\r" }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string s = line;
+
+                Match match = Regex.Match(s.Trim().ToUpper(), @"^GO$");
+                if (true == match.Success)
+                {
+                    if (false == 0 < sqlBatch.Length)
+                        continue;
+
+                    Debug.WriteLine(sqlBatch);
+                    using (IDbCommand command = pConnection.CreateCommand())
+                    {
+                        command.CommandText = sqlBatch;
+                        command.CommandType = CommandType.Text;
+                        command.Transaction = pTransaction;
+                        //command.CommandTimeout
+
+                        try
+                        {
+                            command.ExecuteNonQuery();
+                        }
+                        catch (SqlException ex)
+                        {
+                            return new Int_Exception(ex);
+                        }
+                        catch (OleDbException ex)
+                        {
+                            return new Int_Exception(ex);
+                        }
+                        nRst++;
+                        sqlBatch = string.Empty;
+                    }
+                }
+                else
+                    sqlBatch += s + "\n";
+            }
+
+            return new Int_Exception(nRst);
         }
         #endregion
     }
@@ -684,26 +908,16 @@ SELECT * FROM {0}
 
         public static bool ErrorCheck(Int_Exception p)
         {
-            if (null != p.Err)
+            Exception ex = p.Err;
+            if (null != ex)
             {
-                foreach(Action<Exception> fn in FnErrorCheckActions)
-                {
-                    fn(p.Err);
-                }
+                BaseFile.WriteLogFile(BaseFile.LOG_FILE_MODE.EXCEP, ex.TargetSite.Module.Assembly.ManifestModule.Name + "." +
+                      ex.TargetSite.DeclaringType.Name + "." + ex.TargetSite.Name + "()",
+                      "Exception." + ex.Message);
                 return true;
             }
             return false;
         }
-        public static void AddErrorCheckAction(Action<Exception> fnErrorCheckAction)
-        {
-            FnErrorCheckActions.Add(fnErrorCheckAction);
-        }
-        public static void RemoveErrorCheckAction(Action<Exception> fnErrorCheckAction)
-        {
-            if(FnErrorCheckActions.Contains(fnErrorCheckAction))
-                FnErrorCheckActions.Remove(fnErrorCheckAction);
-        }
-        static List<Action<Exception>> FnErrorCheckActions = new List<Action<Exception>>();
     }
     public static class DataRowExtensions
     {
