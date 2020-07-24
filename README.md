@@ -1,4 +1,4 @@
-# EntityModel
+# EntityContext
 
 ## c# DataBase Connection With SqlConnection and OleDbConnection 
 
