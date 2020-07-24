@@ -9,13 +9,13 @@ using System;
 using System.Data;
 using System.Data.SqlClient;
 
-class Models
+class Context
 {
-    public int Insert(DataTable data, SqlConnection connection, SqlTransaction trasection = null)
+    public int Insert(DataTable table, int batchSize, SqlConnection connection, SqlTransaction trasection = null)
     {
         using (SqlCommand command = connection.CreateCommand())
         {
-            command.CommandText = "SELECT * FROM " + data.TableName;
+            command.CommandText = $"SELECT * FROM {table.TableName}";
             command.CommandType = CommandType.Text;
             command.Transaction = trasection;
 
@@ -34,7 +34,11 @@ class Models
                 }
                 try
                 {
-                    adapter.Update(data);
+                    DataRow[] rows;
+                    while (0 < (rows = get_data_rows(table, DataRowState.Added, batchSize)).Length)
+                    {
+                        adapter.Update(rows);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -44,6 +48,13 @@ class Models
             }
         }
     }
+    
+    Func<DataTable, DataRowState, int, DataRow[]> get_data_rows = (table, state, batchSize) =>
+    {
+        return (from x in table.Rows.Cast<DataRow>()
+                where x.RowState == (x.RowState & state)
+                select x).Take(batchSize).ToArray();
+    };
 }
 
 </code>
